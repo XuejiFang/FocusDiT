@@ -11,16 +11,16 @@ from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from PIL import Image
 
 
-def load_pipeline(transformer_path, time_shift, weight_dtype=torch.bfloat16, cache_dir='./cache', device='cuda'):
-    vae = MochiVAEWrapper('/fangxueji/Models/genmo/mochi-1-preview/vae').to(device)
+def load_pipeline(transformer_path, vae_path, text_encoder_path, time_shift, weight_dtype=torch.bfloat16, cache_dir='./cache', device='cuda'):
+    vae = MochiVAEWrapper(vae_path).to(device)
     vae.vae.to(device, dtype=torch.float32)
     ae_stride_t, ae_stride_h, ae_stride_w = ae_stride_config['Mochi_D12_6x8x8']
     vae.vae_scale_factor = (ae_stride_t, ae_stride_h, ae_stride_w)
     vae.latents_mean = vae.latents_mean.to(device, dtype=torch.float32)
     vae.latents_std = vae.latents_std.to(device, dtype=torch.float32)
 
-    text_encoder = T5EncoderModel.from_pretrained('/fangxueji/Models/google/flan-t5-xxl', cache_dir=cache_dir, torch_dtype=weight_dtype)
-    tokenizer = AutoTokenizer.from_pretrained('/fangxueji/Models/google/flan-t5-xxl', cache_dir=cache_dir)
+    text_encoder = T5EncoderModel.from_pretrained(text_encoder_path, cache_dir=cache_dir, torch_dtype=weight_dtype)
+    tokenizer = AutoTokenizer.from_pretrained(text_encoder_path, cache_dir=cache_dir)
     scheduler = FlowMatchEulerDiscreteScheduler(shift=time_shift)
 
     transformer = FocusDiT.from_pretrained(transformer_path, cache_dir=cache_dir, mask_threshold=1.0, device=device, torch_dtype=weight_dtype)
@@ -32,8 +32,10 @@ def load_pipeline(transformer_path, time_shift, weight_dtype=torch.bfloat16, cac
     pipeline.transformer.eval()
     return pipeline
 
-
-pipe = load_pipeline('outputs/q_wo_min/checkpoint-77200/model_ema', time_shift=3.0)
+transformer_path = 'HakimZJU/FocusDiT'
+vae_path = 'mochi-1-preview/vae'
+text_encoder_path = 'google/flan-t5-xxl'
+pipe = load_pipeline(transformer_path, vae_path, text_encoder_path, time_shift=3.0)
 
 negative_prompt = """nsfw, lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, normal quality, jpeg artifacts, signature, watermark, username, blurry,
                     """
