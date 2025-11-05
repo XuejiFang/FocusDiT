@@ -630,21 +630,16 @@ class BasicTransformerBlock(nn.Module):
         double_self_attention: bool = False,
         upcast_attention: bool = False,
         norm_elementwise_affine: bool = True,
-        norm_type: str = "layer_norm",  # 'layer_norm', 'ada_norm', 'ada_norm_zero', 'ada_norm_single', 'ada_norm_continuous', 'layer_norm_i2vgen'
+        norm_type: str = "ada_norm_single",
         norm_eps: float = 1e-5,
         final_dropout: bool = False,
         attention_type: str = "default",
-        positional_embeddings: Optional[str] = None,
-        num_positional_embeddings: Optional[int] = None,
-        ada_norm_continous_conditioning_embedding_dim: Optional[int] = None,
-        ada_norm_bias: Optional[int] = None,
         ff_inner_dim: Optional[int] = None,
         ff_bias: bool = True,
         attention_out_bias: bool = True,
-        attention_mode: str = "xformers", 
-        downsampler: str = None, 
-        use_rope: bool = False, 
-        interpolation_scale_thw: Tuple[int] = (1, 1, 1), 
+        attention_mode: str = "xformers",
+        use_rope: bool = False,
+        interpolation_scale_thw: Tuple[int] = (1, 1, 1),
         use_q_mask: bool = False,
         use_k_mask: bool = False,
         use_timestep: bool = False,
@@ -652,51 +647,14 @@ class BasicTransformerBlock(nn.Module):
     ):
         super().__init__()
         self.only_cross_attention = only_cross_attention
-        self.downsampler = downsampler
 
-        # We keep these boolean flags for backward-compatibility.
-        self.use_ada_layer_norm_zero = (num_embeds_ada_norm is not None) and norm_type == "ada_norm_zero"
-        self.use_ada_layer_norm = (num_embeds_ada_norm is not None) and norm_type == "ada_norm"
-        self.use_ada_layer_norm_single = norm_type == "ada_norm_single"
-        self.use_layer_norm = norm_type == "layer_norm"
-        self.use_ada_layer_norm_continuous = norm_type == "ada_norm_continuous"
-
-        if norm_type in ("ada_norm", "ada_norm_zero") and num_embeds_ada_norm is None:
-            raise ValueError(
-                f"`norm_type` is set to {norm_type}, but `num_embeds_ada_norm` is not defined. Please make sure to"
-                f" define `num_embeds_ada_norm` if setting `norm_type` to {norm_type}."
-            )
-
+        # Only support ada_norm_single
+        assert norm_type == "ada_norm_single", f"Only ada_norm_single is supported, got {norm_type}"
         self.norm_type = norm_type
         self.num_embeds_ada_norm = num_embeds_ada_norm
 
-        if positional_embeddings and (num_positional_embeddings is None):
-            raise ValueError(
-                "If `positional_embedding` type is defined, `num_positition_embeddings` must also be defined."
-            )
-
-        if positional_embeddings == "sinusoidal":
-            self.pos_embed = SinusoidalPositionalEmbedding(dim, max_seq_length=num_positional_embeddings)
-        else:
-            self.pos_embed = None
-
-        # Define 3 blocks. Each block has its own normalization layer.
-        # 1. Self-Attn
-        if norm_type == "ada_norm":
-            self.norm1 = AdaLayerNorm(dim, num_embeds_ada_norm)
-        elif norm_type == "ada_norm_zero":
-            self.norm1 = AdaLayerNormZero(dim, num_embeds_ada_norm)
-        elif norm_type == "ada_norm_continuous":
-            self.norm1 = AdaLayerNormContinuous(
-                dim,
-                ada_norm_continous_conditioning_embedding_dim,
-                norm_elementwise_affine,
-                norm_eps,
-                ada_norm_bias,
-                "rms_norm",
-            )
-        else:
-            self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
+        # Define normalization layers (LayerNorm for ada_norm_single)
+        self.norm1 = nn.LayerNorm(dim, elementwise_affine=norm_elementwise_affine, eps=norm_eps)
 
         self.attn1 = Attention(
             query_dim=dim,
@@ -707,65 +665,32 @@ class BasicTransformerBlock(nn.Module):
             cross_attention_dim=cross_attention_dim if only_cross_attention else None,
             upcast_attention=upcast_attention,
             out_bias=attention_out_bias,
-            attention_mode=attention_mode, 
-            downsampler=downsampler, 
-            use_rope=use_rope, 
-            interpolation_scale_thw=interpolation_scale_thw, 
+            attention_mode=attention_mode,
+            downsampler=None,
+            use_rope=use_rope,
+            interpolation_scale_thw=interpolation_scale_thw,
         )
 
-        # 2. Cross-Attn
-        if cross_attention_dim is not None or double_self_attention:
-            # We currently only use AdaLayerNormZero for self attention where there will only be one attention block.
-            # I.e. the number of returned modulation chunks from AdaLayerZero would not make sense if returned during
-            # the second cross attention block.
-            if norm_type == "ada_norm":
-                self.norm2 = AdaLayerNorm(dim, num_embeds_ada_norm)
-            elif norm_type == "ada_norm_continuous":
-                self.norm2 = AdaLayerNormContinuous(
-                    dim,
-                    ada_norm_continous_conditioning_embedding_dim,
-                    norm_elementwise_affine,
-                    norm_eps,
-                    ada_norm_bias,
-                    "rms_norm",
-                )
-            else:
-                self.norm2 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
+        # 2. Cross-Attn (required for ada_norm_single)
+        assert cross_attention_dim is not None, "cross_attention_dim must be provided for ada_norm_single"
+        self.norm2 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
 
-            self.attn2 = Attention(
-                query_dim=dim,
-                cross_attention_dim=cross_attention_dim if not double_self_attention else None,
-                heads=num_attention_heads,
-                dim_head=attention_head_dim,
-                dropout=dropout,
-                bias=attention_bias,
-                upcast_attention=upcast_attention,
-                out_bias=attention_out_bias,
-                attention_mode=attention_mode,
-                downsampler=False, 
-                use_rope=False, 
-                interpolation_scale_thw=interpolation_scale_thw, 
-            )  # is self-attn if encoder_hidden_states is none
-        else:
-            self.norm2 = None
-            self.attn2 = None
+        self.attn2 = Attention(
+            query_dim=dim,
+            cross_attention_dim=cross_attention_dim if not double_self_attention else None,
+            heads=num_attention_heads,
+            dim_head=attention_head_dim,
+            dropout=dropout,
+            bias=attention_bias,
+            upcast_attention=upcast_attention,
+            out_bias=attention_out_bias,
+            attention_mode=attention_mode,
+            downsampler=None,
+            use_rope=False,
+            interpolation_scale_thw=interpolation_scale_thw,
+        )
 
         # 3. Feed-forward
-        if norm_type == "ada_norm_continuous":
-            self.norm3 = AdaLayerNormContinuous(
-                dim,
-                ada_norm_continous_conditioning_embedding_dim,
-                norm_elementwise_affine,
-                norm_eps,
-                ada_norm_bias,
-                "layer_norm",
-            )
-
-        elif norm_type in ["ada_norm_zero", "ada_norm", "layer_norm", "ada_norm_continuous"]:
-            self.norm3 = nn.LayerNorm(dim, norm_eps, norm_elementwise_affine)
-        elif norm_type == "layer_norm_i2vgen":
-            self.norm3 = None
-
         self.ff = FeedForward(
             dim,
             dropout=dropout,
@@ -775,13 +700,8 @@ class BasicTransformerBlock(nn.Module):
             bias=ff_bias,
         )
 
-        # 4. Fuser
-        if attention_type == "gated" or attention_type == "gated-text-image":
-            self.fuser = GatedSelfAttentionDense(dim, cross_attention_dim, num_attention_heads, attention_head_dim)
-
-        # 5. Scale-shift for PixArt-Alpha.
-        if norm_type == "ada_norm_single":
-            self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
+        # 4. Scale-shift table for ada_norm_single
+        self.scale_shift_table = nn.Parameter(torch.randn(6, dim) / dim**0.5)
 
         # let chunk size default to None
         self._chunk_size = None
@@ -819,14 +739,11 @@ class BasicTransformerBlock(nn.Module):
         timestep_ori: Optional[torch.LongTensor] = None,
         cross_attention_kwargs: Dict[str, Any] = None,
         class_labels: Optional[torch.LongTensor] = None,
-        frame: int = None, 
-        height: int = None, 
-        width: int = None, 
+        frame: int = None,
+        height: int = None,
+        width: int = None,
         mask_q_pre: Optional[torch.FloatTensor] = None,
     ) -> torch.FloatTensor:
-        assert self.norm_type == "ada_norm_single" and self.downsampler is None
-        assert self.pos_embed is None
-        assert self.attn2 is not None
 
         if cross_attention_kwargs is not None:
             if cross_attention_kwargs.get("scale", None) is not None:

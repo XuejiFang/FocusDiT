@@ -66,7 +66,7 @@ class FocusDiT(ModelMixin, ConfigMixin):
         only_cross_attention: bool = False,
         double_self_attention: bool = False,
         upcast_attention: bool = False,
-        norm_type: str = "layer_norm",  # 'layer_norm', 'ada_norm', 'ada_norm_zero', 'ada_norm_single', 'ada_norm_continuous', 'layer_norm_i2vgen'
+        norm_type: str = "ada_norm_single",
         norm_elementwise_affine: bool = True,
         norm_eps: float = 1e-5,
         attention_type: str = "default",
@@ -87,16 +87,9 @@ class FocusDiT(ModelMixin, ConfigMixin):
     ):
         super().__init__()
 
-        # Validate inputs.
-        if patch_size is not None:
-            if norm_type not in ["ada_norm", "ada_norm_zero", "ada_norm_single"]:
-                raise NotImplementedError(
-                    f"Forward pass is not implemented when `patch_size` is not None and `norm_type` is '{norm_type}'."
-                )
-            elif norm_type in ["ada_norm", "ada_norm_zero"] and num_embeds_ada_norm is None:
-                raise ValueError(
-                    f"When using a `patch_size` and this `norm_type` ({norm_type}), `num_embeds_ada_norm` cannot be None."
-                )
+        # Validate inputs - only ada_norm_single is supported
+        assert norm_type == "ada_norm_single", f"Only ada_norm_single is supported, got {norm_type}"
+        assert patch_size is not None, "patch_size must be provided"
 
         # Set some common variables used across the board.
         self.use_rope = use_rope
@@ -127,23 +120,8 @@ class FocusDiT(ModelMixin, ConfigMixin):
         self.config.use_softmask = use_softmask
         self.config.mask_threshold = mask_threshold
 
-        # 1. Transformer2DModel can process both standard continuous images of shape `(batch_size, num_channels, width, height)` as well as quantized image embeddings of shape `(batch_size, num_image_vectors)`
-        # Define whether input is continuous or discrete depending on configuration
-        assert in_channels is not None and patch_size is not None
-
-        if norm_type == "layer_norm" and num_embeds_ada_norm is not None:
-            deprecation_message = (
-                f"The configuration file of this model: {self.__class__} is outdated. `norm_type` is either not set or"
-                " incorrectly set to `'layer_norm'`. Make sure to set `norm_type` to `'ada_norm'` in the config."
-                " Please make sure to update the config accordingly as leaving `norm_type` might led to incorrect"
-                " results in future versions. If you have downloaded this checkpoint from the Hugging Face Hub, it"
-                " would be very nice if you could open a Pull request for the `transformer/config.json` file"
-            )
-            deprecate("norm_type!=num_embeds_ada_norm", "1.0.0", deprecation_message, standard_warn=False)
-            norm_type = "ada_norm"
-
-        # 2. Initialize the right blocks.
-        # Initialize the output blocks and other projection blocks when necessary.
+        # Initialize the right blocks
+        assert in_channels is not None
         self._init_patched_inputs(norm_type=norm_type)
 
     def _init_patched_inputs(self, norm_type):
@@ -217,27 +195,17 @@ class FocusDiT(ModelMixin, ConfigMixin):
             ]
         )
 
-        if self.config.norm_type != "ada_norm_single":
-            self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
-            self.proj_out_1 = nn.Linear(self.inner_dim, 2 * self.inner_dim)
-            self.proj_out_2 = nn.Linear(
-                self.inner_dim, self.config.patch_size_t * self.config.patch_size * self.config.patch_size * self.out_channels
-            )
-        elif self.config.norm_type == "ada_norm_single":
-            self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
-            self.scale_shift_table = nn.Parameter(torch.randn(2, self.inner_dim) / self.inner_dim**0.5)
-            self.proj_out = nn.Linear(
-                self.inner_dim, self.config.patch_size_t * self.config.patch_size * self.config.patch_size * self.out_channels
-            )
+        # Output layers for ada_norm_single
+        self.norm_out = nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=1e-6)
+        self.scale_shift_table = nn.Parameter(torch.randn(2, self.inner_dim) / self.inner_dim**0.5)
+        self.proj_out = nn.Linear(
+            self.inner_dim, self.config.patch_size_t * self.config.patch_size * self.config.patch_size * self.out_channels
+        )
 
-        # PixArt-Alpha blocks.
-        self.adaln_single = None
-        if self.config.norm_type == "ada_norm_single":
-            # TODO(Sayak, PVP) clean this, for now we use sample size to determine whether to use
-            # additional conditions until we find better name
-            self.adaln_single = AdaLayerNormSingle(
-                self.inner_dim, use_additional_conditions=self.use_additional_conditions
-            )
+        # PixArt-Alpha adaln_single block
+        self.adaln_single = AdaLayerNormSingle(
+            self.inner_dim, use_additional_conditions=self.use_additional_conditions
+        )
 
         self.caption_projection = None
         if self.caption_channels is not None:
@@ -445,25 +413,16 @@ class FocusDiT(ModelMixin, ConfigMixin):
     
     def _get_output_for_patched_inputs(
         self, hidden_states, timestep, class_labels, embedded_timestep, num_frames, height=None, width=None
-    ):  
-        if self.config.norm_type != "ada_norm_single":
-            conditioning = self.transformer_blocks[0].norm1.emb(
-                timestep, class_labels, hidden_dtype=self.dtype
-            )
-            shift, scale = self.proj_out_1(F.silu(conditioning)).chunk(2, dim=1)
-            hidden_states = self.norm_out(hidden_states) * (1 + scale[:, None]) + shift[:, None]
-            hidden_states = self.proj_out_2(hidden_states)
-        elif self.config.norm_type == "ada_norm_single":
-            shift, scale = (self.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, dim=1)
-            hidden_states = self.norm_out(hidden_states)
-            # Modulation
-            hidden_states = hidden_states * (1 + scale) + shift
-            hidden_states = self.proj_out(hidden_states)
-            hidden_states = hidden_states.squeeze(1)
+    ):
+        # ada_norm_single output processing
+        shift, scale = (self.scale_shift_table[None] + embedded_timestep[:, None]).chunk(2, dim=1)
+        hidden_states = self.norm_out(hidden_states)
+        # Modulation
+        hidden_states = hidden_states * (1 + scale) + shift
+        hidden_states = self.proj_out(hidden_states)
+        hidden_states = hidden_states.squeeze(1)
 
         # unpatchify
-        if self.adaln_single is None:
-            height = width = int(hidden_states.shape[1] ** 0.5)
         hidden_states = hidden_states.reshape(
             shape=(-1, num_frames, height, width, self.patch_size_t, self.patch_size, self.patch_size, self.out_channels)
         )
