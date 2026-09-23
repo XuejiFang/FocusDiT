@@ -184,7 +184,8 @@ class FocusDiTPipeline(DiffusionPipeline):
             deprecate("mask_feature", "1.0.0", deprecation_message, standard_warn=False)
 
         if device is None:
-            device = getattr(self, '_execution_device', None) or getattr(self, 'device', None) or torch.device('cuda')
+            device = self.transformer.device
+        text_encoder_device = self.text_encoder.device if self.text_encoder is not None else device
 
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -219,10 +220,13 @@ class FocusDiTPipeline(DiffusionPipeline):
                 )
 
             prompt_attention_mask = text_inputs.attention_mask
-            prompt_attention_mask = prompt_attention_mask.to(device)
+            prompt_attention_mask = prompt_attention_mask.to(text_encoder_device)
 
-            prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=prompt_attention_mask)
+            prompt_embeds = self.text_encoder(
+                text_input_ids.to(text_encoder_device), attention_mask=prompt_attention_mask
+            )
             prompt_embeds = prompt_embeds[0]
+            prompt_attention_mask = prompt_attention_mask.to(device)
 
         if self.text_encoder is not None:
             dtype = self.text_encoder.dtype
@@ -255,12 +259,14 @@ class FocusDiTPipeline(DiffusionPipeline):
                 return_tensors="pt",
             )
             negative_prompt_attention_mask = uncond_input.attention_mask
-            negative_prompt_attention_mask = negative_prompt_attention_mask.to(device)
+            negative_prompt_attention_mask = negative_prompt_attention_mask.to(text_encoder_device)
 
             negative_prompt_embeds = self.text_encoder(
-                uncond_input.input_ids.to(device), attention_mask=negative_prompt_attention_mask
+                uncond_input.input_ids.to(text_encoder_device),
+                attention_mask=negative_prompt_attention_mask,
             )
             negative_prompt_embeds = negative_prompt_embeds[0]
+            negative_prompt_attention_mask = negative_prompt_attention_mask.to(device)
 
         if do_classifier_free_guidance:
             # duplicate unconditional embeddings for each generation per prompt, using mps friendly method
@@ -665,7 +671,7 @@ class FocusDiTPipeline(DiffusionPipeline):
         else:
             batch_size = prompt_embeds.shape[0]
         # import ipdb;ipdb.set_trace()
-        device = getattr(self, '_execution_device', None) or getattr(self, 'device', None) or torch.device('cuda')
+        device = self.transformer.device
 
         # here `guidance_scale` is defined analog to the guidance weight `w` of equation (2)
         # of the Imagen paper: https://arxiv.org/pdf/2205.11487.pdf . `guidance_scale = 1`
@@ -805,7 +811,7 @@ class FocusDiTPipeline(DiffusionPipeline):
 
     def decode_latents(self, latents):
         # print(f'before vae decode', torch.max(latents).item(), torch.min(latents).item(), torch.mean(latents).item(), torch.std(latents).item())
-        video = self.vae.decode(latents.to(torch.float16))
+        video = self.vae.decode(latents.to(device=self.vae.device, dtype=torch.float16))
         # print(f'after vae decode', torch.max(video).item(), torch.min(video).item(), torch.mean(video).item(), torch.std(video).item())
         # video = (video.clamp(0, 1) * 255).to(dtype=torch.uint8).cpu().permute(0, 1, 3, 4, 2).contiguous() # b t h w c
         video = ((video / 2.0 + 0.5).clamp(0, 1) * 255).to(dtype=torch.uint8).cpu().permute(0, 1, 3, 4, 2).contiguous() # b t h w c
