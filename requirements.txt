@@ -1,0 +1,10 @@
+# Install a CUDA-compatible torch and matching torchvision first.
+accelerate
+beautifulsoup4
+diffusers
+einops
+ftfy
+numpy
+Pillow
+sentencepiece
+transformers

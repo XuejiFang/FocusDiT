@@ -1,4 +1,6 @@
 __pycache__/
+.venv/
 outputs
 samples
-CLAUDE.md
+checkpoints/
+cache/
