@@ -49,7 +49,7 @@ python3.10 -m venv .venv
 source .venv/bin/activate
 ```
 
-Install a CUDA-enabled PyTorch 2.x build and matching torchvision using the [official PyTorch instructions](https://pytorch.org/get-started/locally/). Then install the remaining packages:
+Install a CUDA-enabled PyTorch build and matching torchvision using the [official PyTorch instructions](https://pytorch.org/get-started/locally/). We verified inference with PyTorch 2.6.0+cu124 and torchvision 0.21.0+cu124. Then install the remaining packages:
 
 ```bash
 python -m pip install -r requirements.txt
